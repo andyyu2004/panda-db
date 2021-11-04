@@ -1,0 +1,15 @@
+[package]
+name = "panda-sql"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-raft = "0.6"
+futures = "0.3.17"
+sqlparser = "0.12"
+
+[dependencies.panda-db]
+path = "../panda-db/"
+
+[dependencies.tokio]
+version = "1"

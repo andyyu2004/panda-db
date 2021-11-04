@@ -1,4 +1,6 @@
 [workspace]
 members = [
-    "panda-db"
+    "panda-cli",
+    "panda-sql",
+    "panda-db",
 ]

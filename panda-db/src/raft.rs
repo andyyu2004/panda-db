@@ -1,33 +1,33 @@
 mod storage;
 
 use async_raft::raft::*;
-use async_raft::storage::{CurrentSnapshotData, HardState, InitialState};
+use async_raft::storage::{HardState, InitialState};
 use async_raft::{AppData, AppDataResponse, NodeId, Raft, RaftNetwork, RaftStorage};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use storage::PandaStorage;
+use crate::cmd::PandaCmd;
+use crate::data::ResultSet;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub enum Panda {}
+pub use storage::PandaStorage;
 
-impl AppData for Panda {
+pub type PandaRaft = Raft<PandaCmd, PandaResponse, PandaNetwork, PandaStorage>;
+
+impl AppData for PandaCmd {
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct PandaResponse {}
+type PandaResponse = ResultSet;
 
 impl AppDataResponse for PandaResponse {
 }
 
-struct PandaNetwork;
+pub struct PandaNetwork;
 
 #[async_trait]
-impl RaftNetwork<Panda> for PandaNetwork {
+impl RaftNetwork<PandaCmd> for PandaNetwork {
     async fn append_entries(
         &self,
         target: NodeId,
-        rpc: AppendEntriesRequest<Panda>,
+        rpc: AppendEntriesRequest<PandaCmd>,
     ) -> anyhow::Result<AppendEntriesResponse> {
         todo!()
     }
@@ -44,5 +44,3 @@ impl RaftNetwork<Panda> for PandaNetwork {
         todo!()
     }
 }
-
-type PandaRaft = Raft<Panda, PandaResponse, PandaNetwork, PandaStorage>;

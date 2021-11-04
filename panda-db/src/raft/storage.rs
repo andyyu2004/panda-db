@@ -4,22 +4,30 @@ use async_raft::storage::CurrentSnapshotData;
 use rocksdb::{DBIteratorWithThreadMode, Direction, IteratorMode, WriteBatch};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const HARD_STATE_KEY: &[u8] = b"hardstate";
 
-pub type LogEntry = Entry<Panda>;
-
+#[derive(Default)]
 pub struct PandaStateMachine {
     last_applied_log: AtomicU64,
 }
 
-pub(crate) struct PandaStorage {
+pub struct PandaStorage {
     node_id: NodeId,
     db: rocksdb::DB,
     sm: PandaStateMachine,
 }
 
 impl PandaStorage {
+    pub fn new(node_id: NodeId) -> PandaResult<Arc<Self>> {
+        Ok(Arc::new(Self {
+            node_id,
+            db: rocksdb::DB::open(&rocksdb::Options::default(), "/tmp/db")?,
+            sm: Default::default(),
+        }))
+    }
+
     pub fn iter(&self) -> Iter<'_> {
         self.into_iter()
     }
@@ -31,7 +39,7 @@ impl PandaStorage {
             .map(|bytes| bincode::deserialize(&bytes).expect("deserialization should not fail")))
     }
 
-    pub(crate) fn last_entry(&self) -> Option<Entry<Panda>> {
+    pub(crate) fn last_entry(&self) -> Option<Entry<PandaCmd>> {
         self.iter().next().map(|(_, v)| v)
     }
 
@@ -54,7 +62,7 @@ pub struct RangeIter<'a> {
 }
 
 impl Iterator for RangeIter<'_> {
-    type Item = (u64, Entry<Panda>);
+    type Item = (u64, Entry<PandaCmd>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (k, v) = self.iter.next()?;
@@ -71,7 +79,7 @@ pub struct Iter<'a> {
 }
 
 impl Iterator for Iter<'_> {
-    type Item = (u64, Entry<Panda>);
+    type Item = (u64, Entry<PandaCmd>);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next().map(|(k, v)| {
@@ -95,7 +103,7 @@ impl<'a> IntoIterator for &'a PandaStorage {
 pub enum ShutdownError {}
 
 #[async_trait]
-impl RaftStorage<Panda, PandaResponse> for PandaStorage {
+impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
     type ShutdownError = ShutdownError;
     type Snapshot = tokio::fs::File;
 
@@ -138,7 +146,7 @@ impl RaftStorage<Panda, PandaResponse> for PandaStorage {
         Ok(self.db.put(HARD_STATE_KEY, bincode::serialize(hs).unwrap())?)
     }
 
-    async fn get_log_entries(&self, start: u64, stop: u64) -> anyhow::Result<Vec<Entry<Panda>>> {
+    async fn get_log_entries(&self, start: u64, stop: u64) -> anyhow::Result<Vec<Entry<PandaCmd>>> {
         Ok(self.range(start..stop).map(|(_, v)| v).collect())
     }
 
@@ -150,11 +158,11 @@ impl RaftStorage<Panda, PandaResponse> for PandaStorage {
         Ok(())
     }
 
-    async fn append_entry_to_log(&self, entry: &Entry<Panda>) -> anyhow::Result<()> {
+    async fn append_entry_to_log(&self, entry: &Entry<PandaCmd>) -> anyhow::Result<()> {
         Ok(self.db.put(entry.index.to_be_bytes(), bincode::serialize(&entry).unwrap())?)
     }
 
-    async fn replicate_to_log(&self, entries: &[Entry<Panda>]) -> anyhow::Result<()> {
+    async fn replicate_to_log(&self, entries: &[Entry<PandaCmd>]) -> anyhow::Result<()> {
         let mut batch = WriteBatch::default();
         for entry in entries {
             batch.put(entry.index.to_be_bytes(), bincode::serialize(&entry).unwrap());
@@ -166,12 +174,15 @@ impl RaftStorage<Panda, PandaResponse> for PandaStorage {
     async fn apply_entry_to_state_machine(
         &self,
         index: &u64,
-        data: &Panda,
+        data: &PandaCmd,
     ) -> anyhow::Result<PandaResponse> {
         todo!()
     }
 
-    async fn replicate_to_state_machine(&self, entries: &[(&u64, &Panda)]) -> anyhow::Result<()> {
+    async fn replicate_to_state_machine(
+        &self,
+        entries: &[(&u64, &PandaCmd)],
+    ) -> anyhow::Result<()> {
         todo!()
     }
 

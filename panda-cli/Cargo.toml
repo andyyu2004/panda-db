@@ -1,0 +1,14 @@
+[package]
+name = "panda-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "panda"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = "3.0.0-beta.5"
+rustyline = "9"
+
