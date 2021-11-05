@@ -1,14 +1,16 @@
 mod plan;
 mod transaction;
 
-use std::sync::Arc;
+pub use panda_db::PandaResult;
 
 use futures::future;
 use panda_db::data::ResultSet;
-use panda_db::{PandaNetwork, PandaRaft, PandaResult, PandaStorage};
+use panda_db::{PandaNetwork, PandaRaft, PandaStorage};
 use sqlparser::ast;
 use sqlparser::dialect::{Dialect, PostgreSqlDialect};
 use sqlparser::parser::{Parser, ParserError};
+use std::sync::Arc;
+use tokio::net::ToSocketAddrs;
 
 use self::plan::QueryPlan;
 use self::transaction::Transaction;
@@ -49,12 +51,15 @@ pub struct PandaEngine {
 }
 
 impl PandaEngine {
-    pub fn new() -> PandaResult<Self> {
+    pub async fn new<A: ToSocketAddrs>(
+        addr: impl ToSocketAddrs,
+        join_addrs: impl IntoIterator<Item = A>,
+    ) -> PandaResult<Self> {
         const CLUSTER_NAME: String = String::new();
         let config = async_raft::Config::build(CLUSTER_NAME).validate()?;
         // TODO properly assign node_id according to requirements
         let node_id = 0;
-        let network = Arc::new(PandaNetwork);
+        let network = PandaNetwork::bind(addr, join_addrs).await?;
         let storage = PandaStorage::new(node_id)?;
         Ok(Self { raft: PandaRaft::new(node_id, Arc::new(config), network, storage) })
     }

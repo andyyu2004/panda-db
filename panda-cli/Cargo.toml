@@ -10,5 +10,16 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = "3.0.0-beta.5"
+itertools = "0.10"
 rustyline = "9"
+
+[dependencies.panda-sql]
+path = "../panda-sql"
+
+[dependencies.tokio]
+version = "1"
+features = ["macros"]
+
+[dev-dependencies]
+shellwords = "1"
 

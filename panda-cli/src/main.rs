@@ -1,21 +1,34 @@
+mod cli;
+
+use std::future;
+
 use clap::Parser;
+use panda_sql::PandaEngine;
 use rustyline::completion::{Candidate, Completer};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hint, Hinter};
 use rustyline::validate::Validator;
 use rustyline::{Editor, Helper};
 
-#[derive(Parser)]
-struct Opts {}
+use crate::cli::{Cmd, Opts};
 
-fn main() -> anyhow::Result<()> {
-    let _opts = Opts::parse();
-
-    let mut rl = Editor::<Autocomplete>::new();
-    loop {
-        let line = rl.readline("panda> ")?;
-        println!("{}", line);
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let opts = Opts::parse();
+    match opts.cmd {
+        Cmd::Start(opts) => {
+            let _engine = PandaEngine::new(opts.listen_addr, opts.join).await?;
+            future::pending::<()>().await;
+        }
+        Cmd::Shell => {
+            let mut rl = Editor::<Autocomplete>::new();
+            loop {
+                let line = rl.readline("panda> ")?;
+                println!("{}", line);
+            }
+        }
     }
+    Ok(())
 }
 
 struct Autocomplete;
