@@ -1,25 +1,32 @@
+#![macro_use]
+extern crate anyhow;
+
+mod pg;
 mod plan;
 mod transaction;
 
 pub use panda_db::PandaResult;
+pub use panda_db::DEFAULT_LISTEN_ADDR;
 
 use futures::future;
 use panda_db::data::ResultSet;
-use panda_db::{PandaNetwork, PandaRaft, PandaStorage};
+use panda_db::{PandaError, PandaNetwork, PandaRaft, PandaStorage};
 use sqlparser::ast;
 use sqlparser::dialect::{Dialect, PostgreSqlDialect};
 use sqlparser::parser::{Parser, ParserError};
 use std::sync::Arc;
-use tokio::net::ToSocketAddrs;
+use tokio::net::{TcpListener, ToSocketAddrs};
 
 use self::plan::QueryPlan;
 use self::transaction::Transaction;
+
+pub const DEFAULT_PG_ADDR: &str = "127.0.0.1:26630";
 
 pub struct PandaSession {
     engine: PandaEngine,
 }
 
-const DIALECT: &'static dyn Dialect = &PostgreSqlDialect {};
+const DIALECT: &dyn Dialect = &PostgreSqlDialect {};
 
 impl PandaSession {
     fn parse(&self, query: &str) -> Result<Vec<ast::Statement>, ParserError> {
@@ -52,9 +59,11 @@ pub struct PandaEngine {
 
 impl PandaEngine {
     pub async fn new<A: ToSocketAddrs>(
-        addr: impl ToSocketAddrs,
+        addr: A,
+        pg_addr: A,
         join_addrs: impl IntoIterator<Item = A>,
     ) -> PandaResult<Self> {
+        let pg_server = Self::pg_server(pg_addr).await?;
         const CLUSTER_NAME: String = String::new();
         let config = async_raft::Config::build(CLUSTER_NAME).validate()?;
         // TODO properly assign node_id according to requirements
@@ -63,4 +72,13 @@ impl PandaEngine {
         let storage = PandaStorage::new(node_id)?;
         Ok(Self { raft: PandaRaft::new(node_id, Arc::new(config), network, storage) })
     }
+
+    async fn pg_server(pg_addr: impl ToSocketAddrs) -> PandaResult<PgServer> {
+        pg::handle_pg_connections(pg_addr).await
+    }
 }
+
+struct PgServer;
+
+#[cfg(test)]
+mod tests;

@@ -4,12 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1"
 async-raft = "0.6"
+byteorder = "1"
+bytes = "1"
 futures = "0.3.17"
+memchr = "2"
+postgres-protocol = "0.6"
 sqlparser = "0.12"
+tokio-postgres = "0.7"
 
 [dependencies.panda-db]
 path = "../panda-db/"
 
 [dependencies.tokio]
 version = "1"
+
+[dependencies.tokio-util]
+version = "0.6"
+features = ["codec"]

@@ -8,12 +8,16 @@ macro_rules! parse {
 
 #[test]
 fn test_parse_start_cli_args() -> PandaResult<()> {
-    let opts =
-        parse!("panda start --listen-addr=localhost:1234 --join localhost:2255,localhost:33445")?;
+    let opts = parse!(
+        "panda start --listen-addr=localhost:1234 --pg-addr=localhost:1235 --join localhost:2255,localhost:33445"
+    )?;
     assert_eq!(
         opts.cmd,
         Cmd::Start(CmdStart {
-            listen_addr: "localhost:1234".to_owned(),
+            conn: ConnConfig {
+                listen_addr: "localhost:1234".to_owned(),
+                pg_addr: "localhost:1235".to_owned()
+            },
             join: vec!["localhost:2255".to_owned(), "localhost:33445".to_owned()],
         })
     );

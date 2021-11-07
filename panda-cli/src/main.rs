@@ -9,21 +9,38 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::{Hint, Hinter};
 use rustyline::validate::Validator;
 use rustyline::{Editor, Helper};
+use tokio_postgres::NoTls;
 
 use crate::cli::{Cmd, Opts};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let opts = Opts::parse();
     match opts.cmd {
         Cmd::Start(opts) => {
-            let _engine = PandaEngine::new(opts.listen_addr, opts.join).await?;
+            let _engine =
+                PandaEngine::new(&opts.conn.listen_addr, &opts.conn.pg_addr, opts.join.iter())
+                    .await?;
+            future::pending::<()>().await;
+        }
+        Cmd::StartSingleNode(opts) => {
+            let _engine =
+                PandaEngine::new(&opts.conn.listen_addr, &opts.conn.pg_addr, vec![]).await?;
             future::pending::<()>().await;
         }
         Cmd::Shell => {
+            let (client, connection) =
+                tokio_postgres::connect("host=localhost port=26630", NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(err) = connection.await {
+                    eprintln!("connection error: {}", err);
+                }
+            });
             let mut rl = Editor::<Autocomplete>::new();
             loop {
                 let line = rl.readline("panda> ")?;
+                client.query(&line, &[]).await?;
                 println!("{}", line);
             }
         }

@@ -12,13 +12,15 @@ anyhow = "1"
 clap = "3.0.0-beta.5"
 itertools = "0.10"
 rustyline = "9"
+tokio-postgres = "0.7"
+tracing-subscriber = "0.2"
 
 [dependencies.panda-sql]
 path = "../panda-sql"
 
 [dependencies.tokio]
 version = "1"
-features = ["macros"]
+features = ["macros", "parking_lot"]
 
 [dev-dependencies]
 shellwords = "1"

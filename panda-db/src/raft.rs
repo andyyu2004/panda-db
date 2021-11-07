@@ -41,11 +41,11 @@ impl PandaNetwork {
         addr: impl ToSocketAddrs,
         join_addrs: impl IntoIterator<Item = A>,
     ) -> PandaResult<Arc<Self>> {
-        let listener = tarpc::serde_transport::tcp::listen(addr, codec!()).await?;
-
         let nodes = future::try_join_all(join_addrs.into_iter().map(RaftNode::connect)).await?;
         let this = Arc::new(Self { nodes });
         let server = Arc::clone(&this);
+        let listener = tarpc::serde_transport::tcp::listen(addr, codec!()).await?;
+        println!("Panda listening on `{}`", listener.local_addr());
         tokio::spawn(async move {
             listener
                 .filter_map(|r| async move { r.ok() })

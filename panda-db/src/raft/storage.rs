@@ -1,13 +1,20 @@
 use super::*;
 use crate::PandaResult;
 use async_raft::storage::CurrentSnapshotData;
+use parking_lot::RwLock;
 use rocksdb::{DBIterator, DBRawIterator, Direction, IteratorMode, WriteBatch};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::fs::File;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 
 const HARD_STATE_KEY: &[u8] = b"hardstate";
+
+// store it under `/var/lib/panda` eventually
+// maybe /tmp/panda will do for now
+const SNAPSHOT_DIR: &str = "/tmp/panda/snapshots";
 
 /// The panda raft state machine
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -25,9 +32,12 @@ impl Clone for Panda {
 
 pub struct PandaStorage {
     node_id: NodeId,
-    db: rocksdb::DB,
-    panda: Panda,
-    snapshot_idx: AtomicUsize,
+    logdb: rocksdb::DB,
+    metadb: rocksdb::DB,
+    panda: RwLock<Panda>,
+    next_snapshot_idx: AtomicU64,
+    /// The id of the current active snapshot. u64::MAX if no snapshot is active.
+    active_snapshot_id: AtomicU64,
 }
 
 impl PandaStorage {
@@ -36,9 +46,11 @@ impl PandaStorage {
         opts.create_if_missing(true);
         Ok(Arc::new(Self {
             node_id,
-            db: rocksdb::DB::open(&opts, "/tmp/db")?,
+            logdb: rocksdb::DB::open(&opts, "/tmp/panda/logdb")?,
+            metadb: rocksdb::DB::open(&opts, "/tmp/panda/metadb")?,
             panda: Default::default(),
-            snapshot_idx: Default::default(),
+            next_snapshot_idx: Default::default(),
+            active_snapshot_id: AtomicU64::new(u64::MAX),
         }))
     }
 
@@ -48,13 +60,13 @@ impl PandaStorage {
 
     /// Create an iterator that performs a iteration from the most recent entry to the oldest
     pub fn values(&self) -> ValueIter<'_> {
-        let mut iter = self.db.raw_iterator();
+        let mut iter = self.logdb.raw_iterator();
         iter.seek_to_last();
         ValueIter { iter }
     }
 
     fn get_hard_state(&self) -> PandaResult<Option<HardState>> {
-        Ok(self.db.get(HARD_STATE_KEY)?.map(|bytes| deserialize(&bytes)))
+        Ok(self.metadb.get(HARD_STATE_KEY)?.map(|bytes| deserialize(&bytes)))
     }
 
     pub(crate) fn last_entry(&self) -> Option<Entry<PandaCmd>> {
@@ -62,7 +74,7 @@ impl PandaStorage {
     }
 
     fn get(&self, idx: u64) -> PandaResult<Entry<PandaCmd>> {
-        let bytes = self.db.get_pinned(idx.to_be_bytes())?.unwrap();
+        let bytes = self.logdb.get_pinned(idx.to_be_bytes())?.unwrap();
         let entry = deserialize::<Entry<PandaCmd>>(&bytes);
         debug_assert_eq!(entry.index, idx);
         Ok(entry)
@@ -70,7 +82,8 @@ impl PandaStorage {
 
     fn range(&self, range: Range<u64>) -> RangeIter<'_> {
         let start = range.start.to_be_bytes();
-        let iter = Iter { iter: self.db.iterator(IteratorMode::From(&start, Direction::Forward)) };
+        let iter =
+            Iter { iter: self.logdb.iterator(IteratorMode::From(&start, Direction::Forward)) };
         RangeIter { iter, end: range.end }
     }
 
@@ -85,6 +98,25 @@ impl PandaStorage {
             _ => None,
         })
         .unwrap_or_else(|| MembershipConfig::new_initial(self.node_id))
+    }
+
+    fn active_snapshot_file(&self) -> io::Result<Option<std::fs::File>> {
+        let idx = self.active_snapshot_id.load(Ordering::SeqCst);
+        if idx == u64::MAX {
+            return Ok(None);
+        }
+        std::fs::File::open(format!("{}-{}", SNAPSHOT_DIR, idx)).map(Some)
+    }
+
+    fn next_snapshot_id(&self) -> String {
+        let idx = self.next_snapshot_idx.fetch_add(1, Ordering::SeqCst);
+        format!("{}", idx)
+    }
+
+    async fn create_snapshot_file(&self) -> io::Result<(String, File)> {
+        let snapshot_id = self.next_snapshot_id();
+        let file = File::create(Path::new(SNAPSHOT_DIR).join(&snapshot_id)).await?;
+        Ok((snapshot_id, file))
     }
 }
 
@@ -156,7 +188,7 @@ impl<'a> IntoIterator for &'a PandaStorage {
     type Item = <Self::IntoIter as IntoIterator>::Item;
 
     fn into_iter(self) -> Self::IntoIter {
-        Iter { iter: self.db.iterator(IteratorMode::End) }
+        Iter { iter: self.logdb.iterator(IteratorMode::End) }
     }
 }
 
@@ -164,6 +196,7 @@ impl<'a> IntoIterator for &'a PandaStorage {
 pub struct PandaSnapshot {
     term: u64,
     index: u64,
+    membership: MembershipConfig,
     panda: Panda,
 }
 
@@ -185,7 +218,7 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
             Some(hard_state) => {
                 let (last_log_index, last_log_term) =
                     self.last_entry().map(|entry| (entry.index, entry.term)).unwrap_or((0, 0));
-                let last_applied_log = self.panda.last_applied_log.load(Ordering::SeqCst);
+                let last_applied_log = self.panda.read().last_applied_log.load(Ordering::SeqCst);
                 Ok(InitialState {
                     last_log_index,
                     last_log_term,
@@ -203,7 +236,7 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
     }
 
     async fn save_hard_state(&self, hs: &HardState) -> anyhow::Result<()> {
-        Ok(self.db.put(HARD_STATE_KEY, serialize(hs))?)
+        Ok(self.metadb.put(HARD_STATE_KEY, serialize(hs))?)
     }
 
     async fn get_log_entries(&self, start: u64, stop: u64) -> anyhow::Result<Vec<Entry<PandaCmd>>> {
@@ -214,12 +247,12 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
         let mut batch = WriteBatch::default();
         let stop = stop.unwrap_or(u64::MAX);
         batch.delete_range(start.to_be_bytes(), stop.to_be_bytes());
-        self.db.write(batch)?;
+        self.logdb.write(batch)?;
         Ok(())
     }
 
     async fn append_entry_to_log(&self, entry: &Entry<PandaCmd>) -> anyhow::Result<()> {
-        Ok(self.db.put(entry.index.to_be_bytes(), serialize(&entry))?)
+        Ok(self.logdb.put(entry.index.to_be_bytes(), serialize(&entry))?)
     }
 
     async fn replicate_to_log(&self, entries: &[Entry<PandaCmd>]) -> anyhow::Result<()> {
@@ -227,7 +260,7 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
         for entry in entries {
             batch.put(entry.index.to_be_bytes(), serialize(&entry));
         }
-        self.db.write(batch)?;
+        self.logdb.write(batch)?;
         Ok(())
     }
 
@@ -247,8 +280,12 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
     }
 
     async fn do_log_compaction(&self) -> anyhow::Result<CurrentSnapshotData<Self::Snapshot>> {
-        let index = self.panda.last_applied_log.load(Ordering::SeqCst);
-        let panda = self.panda.clone();
+        let (index, panda) = {
+            let panda_read = self.panda.read();
+            let index = panda_read.last_applied_log.load(Ordering::SeqCst);
+            let panda = panda_read.clone();
+            (index, panda)
+        };
         assert_eq!(
             index,
             panda.last_applied_log.load(Ordering::SeqCst),
@@ -257,26 +294,16 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
         let term = self.get(index)?.term;
         let membership =
             self.find_membership_config_from(self.values().skip_while(|entry| entry.index > index));
-        let snapshot = PandaSnapshot { index, term, panda };
-        // TODO where to save file?
-        let mut snapshot_file = tokio::fs::File::create("some-path").await?;
+        let snapshot = PandaSnapshot { index, term, membership: membership.clone(), panda };
+        let (_, mut snapshot_file) = self.create_snapshot_file().await?;
         snapshot_file.write_all(&serialize(&snapshot)).await?;
         snapshot_file.flush().await?;
-        Ok(CurrentSnapshotData {
-            index,
-            membership,
-            term: self.get(index)?.term,
-            snapshot: Box::new(snapshot_file),
-        })
+        Ok(CurrentSnapshotData { index, membership, term, snapshot: Box::new(snapshot_file) })
     }
 
     async fn create_snapshot(&self) -> anyhow::Result<(String, Box<Self::Snapshot>)> {
-        // store it under /var/lib/panda eventually
-        // maybe /tmp/panda will do for now
-        let snapshot_id = format!("snapshot-{}", self.snapshot_idx.fetch_add(1, Ordering::SeqCst));
-        // TODO
-        let snapshot_file = tokio::fs::File::create(&snapshot_id).await?;
-        Ok((snapshot_id, Box::new(snapshot_file)))
+        let (id, snapshot_file) = self.create_snapshot_file().await?;
+        Ok((id, Box::new(snapshot_file)))
     }
 
     async fn finalize_snapshot_installation(
@@ -285,14 +312,41 @@ impl RaftStorage<PandaCmd, PandaResponse> for PandaStorage {
         term: u64,
         delete_through: Option<u64>,
         id: String,
-        snapshot: Box<Self::Snapshot>,
+        mut snapshot: Box<Self::Snapshot>,
     ) -> anyhow::Result<()> {
-        todo!()
+        let membership =
+            self.find_membership_config_from(self.values().skip_while(|entry| entry.index > index));
+        self.active_snapshot_id
+            .store(id.parse::<u64>().expect("invalid snapshot id"), Ordering::SeqCst);
+        let entry: Entry<PandaCmd> = Entry::new_snapshot_pointer(index, term, id, membership);
+
+        let mut batch = WriteBatch::default();
+        let max = delete_through.unwrap_or(u64::MAX);
+        batch.delete_range(u64::MIN.to_be_bytes(), max.to_be_bytes());
+        self.logdb.put(index.to_be_bytes(), serialize(&entry))?;
+        self.logdb.write(batch)?;
+
+        let mut buf = vec![];
+        snapshot.read_to_end(&mut buf).await?;
+        let panda_snapshot = deserialize::<PandaSnapshot>(&buf);
+        *self.panda.write() = panda_snapshot.panda;
+        Ok(())
     }
 
     async fn get_current_snapshot(
         &self,
     ) -> anyhow::Result<Option<CurrentSnapshotData<Self::Snapshot>>> {
-        todo!()
+        let file = match self.active_snapshot_file()? {
+            Some(file) => file,
+            None => return Ok(None),
+        };
+        let PandaSnapshot { term, index, membership, .. } =
+            bincode::deserialize_from::<_, PandaSnapshot>(&file)?;
+        Ok(Some(CurrentSnapshotData {
+            term,
+            index,
+            membership,
+            snapshot: Box::new(File::from_std(file)),
+        }))
     }
 }
