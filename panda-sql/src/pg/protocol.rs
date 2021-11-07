@@ -48,11 +48,7 @@ impl Encoder<BackendMessage> for PgCodec {
         match msg {
             BackendMessage::Raw(bytes) => dst.extend_from_slice(&bytes),
             BackendMessage::AuthenticationOk => write(AUTHENTICATION_TAG, &u32::to_be_bytes(0)),
-            BackendMessage::ReadyForQuery(status) => match status {
-                ReadyForQueryStatus::Idle => write(READY_FOR_QUERY_TAG, &[status as u8]),
-                ReadyForQueryStatus::Tran => todo!(),
-                ReadyForQueryStatus::Error => todo!(),
-            },
+            BackendMessage::ReadyForQuery(status) => write(READY_FOR_QUERY_TAG, &[status as u8]),
         }
         Ok(())
     }
@@ -67,7 +63,7 @@ impl Decoder for PgCodec {
             if src.is_empty() {
                 return Ok(None);
             }
-            let len = BigEndian::read_u32(&src) as usize;
+            let len = BigEndian::read_u32(src) as usize;
             let src = src.split_to(len);
             let mut bytes = &src[4..];
             let msg = if bytes == SSL_MAGIC {
@@ -109,7 +105,7 @@ fn read_cstr<'a>(bytes: &mut &'a [u8]) -> PandaResult<&'a str> {
         Some(idx) => {
             let s = &bytes[..idx];
             *bytes = &bytes[idx + 1..];
-            Ok(std::str::from_utf8(&s)?)
+            Ok(std::str::from_utf8(s)?)
         }
         None => unreachable!(),
     }
