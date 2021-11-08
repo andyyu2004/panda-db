@@ -1,4 +1,6 @@
-#![macro_use]
+#![feature(try_blocks)]
+
+#[macro_use]
 extern crate anyhow;
 
 mod pg;
@@ -17,13 +19,14 @@ use sqlparser::parser::{Parser, ParserError};
 use std::sync::Arc;
 use tokio::net::{TcpListener, ToSocketAddrs};
 
+use self::pg::PgServer;
 use self::plan::QueryPlan;
 use self::transaction::Transaction;
 
 pub const DEFAULT_PG_ADDR: &str = "127.0.0.1:26630";
 
 pub struct PandaSession {
-    engine: PandaEngine,
+    engine: Arc<PandaEngine>,
 }
 
 const DIALECT: &dyn Dialect = &PostgreSqlDialect {};
@@ -58,27 +61,38 @@ pub struct PandaEngine {
 }
 
 impl PandaEngine {
-    pub async fn new<A: ToSocketAddrs>(
+    pub async fn new<A>(
         addr: A,
         pg_addr: A,
         join_addrs: impl IntoIterator<Item = A>,
-    ) -> PandaResult<Self> {
-        let pg_server = Self::pg_server(pg_addr).await?;
+    ) -> PandaResult<Arc<Self>>
+    where
+        A: ToSocketAddrs + Send + 'static,
+    {
         const CLUSTER_NAME: String = String::new();
         let config = async_raft::Config::build(CLUSTER_NAME).validate()?;
         // TODO properly assign node_id according to requirements
         let node_id = 0;
         let network = PandaNetwork::bind(addr, join_addrs).await?;
         let storage = PandaStorage::new(node_id)?;
-        Ok(Self { raft: PandaRaft::new(node_id, Arc::new(config), network, storage) })
+        let this =
+            Arc::new(Self { raft: PandaRaft::new(node_id, Arc::new(config), network, storage) });
+        Arc::clone(&this).spawn_pg_server(pg_addr).await?;
+        Ok(this)
     }
 
-    async fn pg_server(pg_addr: impl ToSocketAddrs) -> PandaResult<PgServer> {
-        pg::handle_pg_connections(pg_addr).await
+    fn new_session(self: Arc<Self>) -> PandaSession {
+        PandaSession { engine: self }
+    }
+
+    async fn spawn_pg_server(
+        self: Arc<Self>,
+        pg_addr: impl ToSocketAddrs + Send + 'static,
+    ) -> PandaResult<()> {
+        tokio::spawn(PgServer::new(self).handle_pg_connections(pg_addr));
+        Ok(())
     }
 }
-
-struct PgServer;
 
 #[cfg(test)]
 mod tests;

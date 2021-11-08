@@ -20,13 +20,12 @@ async fn main() -> anyhow::Result<()> {
     match opts.cmd {
         Cmd::Start(opts) => {
             let _engine =
-                PandaEngine::new(&opts.conn.listen_addr, &opts.conn.pg_addr, opts.join.iter())
-                    .await?;
+                PandaEngine::new(opts.conn.listen_addr, opts.conn.pg_addr, opts.join).await?;
             future::pending::<()>().await;
         }
         Cmd::StartSingleNode(opts) => {
             let _engine =
-                PandaEngine::new(&opts.conn.listen_addr, &opts.conn.pg_addr, vec![]).await?;
+                PandaEngine::new(opts.conn.listen_addr, opts.conn.pg_addr, vec![]).await?;
             future::pending::<()>().await;
         }
         Cmd::Shell => {

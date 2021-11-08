@@ -5,9 +5,9 @@ use panda_db::DEFAULT_LISTEN_ADDR;
 use tokio::sync::OnceCell;
 use tokio_postgres::NoTls;
 
-static ENGINE: OnceCell<PandaEngine> = OnceCell::const_new();
+static ENGINE: OnceCell<Arc<PandaEngine>> = OnceCell::const_new();
 
-async fn engine() -> PandaResult<&'static PandaEngine> {
+async fn engine() -> PandaResult<&'static Arc<PandaEngine>> {
     ENGINE.get_or_try_init(|| PandaEngine::new(DEFAULT_LISTEN_ADDR, DEFAULT_PG_ADDR, vec![])).await
 }
 

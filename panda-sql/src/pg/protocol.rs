@@ -1,11 +1,16 @@
+use std::io;
+
 use anyhow::ensure;
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use panda_db::{PandaError, PandaResult};
 use postgres_protocol::message::backend::{self, *};
 use tokio_util::codec::{Decoder, Encoder};
 
 const SSL_MAGIC: [u8; 4] = u32::to_be_bytes(80877103);
+const PARSE_TAG: u8 = b'P';
+const QUERY_TAG: u8 = b'Q';
+const TERMINATE_TAG: u8 = b'X';
 
 #[derive(Default)]
 pub(super) struct PgCodec {
@@ -16,6 +21,10 @@ pub(super) struct PgCodec {
 
 pub(super) enum BackendMessage {
     AuthenticationOk,
+    Message(backend::Message),
+    CommandComplete,
+    EmptyQueryResponse,
+    ParameterStatus(String, String),
     ReadyForQuery(ReadyForQueryStatus),
     Raw(Bytes),
 }
@@ -30,8 +39,10 @@ pub(super) enum ReadyForQueryStatus {
 
 #[derive(Debug)]
 pub(super) enum FrontendMessage {
+    Query(String),
     SSLRequest,
     StartupMessage { protocol_version: u32, parameters: Vec<(String, String)> },
+    Terminate,
 }
 
 impl Encoder<BackendMessage> for PgCodec {
@@ -45,10 +56,43 @@ impl Encoder<BackendMessage> for PgCodec {
             dst.extend_from_slice(data);
         };
 
+        macro_rules! write_cstr {
+            ($s:expr) => {{
+                let s = $s.as_bytes();
+                if s.contains(&0) {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "string contains embedded null",
+                    ))?;
+                }
+                dst.extend_from_slice(s);
+                dst.put_u8(0);
+            }};
+        }
+
+        macro_rules! write_msg {
+            ($tag:expr, $msg:expr) => {
+                write($tag, $msg)
+            };
+            ($tag:expr) => {
+                write($tag, &[])
+            };
+        }
+
         match msg {
             BackendMessage::Raw(bytes) => dst.extend_from_slice(&bytes),
-            BackendMessage::AuthenticationOk => write(AUTHENTICATION_TAG, &u32::to_be_bytes(0)),
-            BackendMessage::ReadyForQuery(status) => write(READY_FOR_QUERY_TAG, &[status as u8]),
+            BackendMessage::AuthenticationOk =>
+                write_msg!(AUTHENTICATION_TAG, &u32::to_be_bytes(0)),
+            BackendMessage::ReadyForQuery(status) =>
+                write_msg!(READY_FOR_QUERY_TAG, &[status as u8]),
+            BackendMessage::EmptyQueryResponse => write_msg!(EMPTY_QUERY_RESPONSE_TAG),
+            BackendMessage::Message(_) => todo!(),
+            BackendMessage::CommandComplete => todo!(),
+            BackendMessage::ParameterStatus(key, value) => {
+                write_msg!(PARAMETER_STATUS_TAG);
+                write_cstr!(&key);
+                write_cstr!(&value);
+            }
         }
         Ok(())
     }
@@ -93,10 +137,16 @@ impl Decoder for PgCodec {
             Some(header) => header,
             None => return Ok(None),
         };
+        src.advance(1 + header.len() as usize);
 
-        match header.tag() {
-            tag => panic!("{}", tag),
-        }
+        let data = &src[..header.len() as usize - 4];
+        let msg = match header.tag() {
+            QUERY_TAG => FrontendMessage::Query(std::str::from_utf8(data)?.to_owned()),
+            PARSE_TAG => todo!("parse"),
+            TERMINATE_TAG => FrontendMessage::Terminate,
+            tag => panic!("unsupported tag {}", tag),
+        };
+        Ok(Some(msg))
     }
 }
 
